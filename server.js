@@ -1,0 +1,23 @@
+require("dotenv").config();
+const express=require("express"), path=require("path"), Database=require("better-sqlite3");
+const cookieParser=require("cookie-parser"), rateLimit=require("express-rate-limit"), crypto=require("crypto");
+const app=express(), db=new Database("hanin-net.db");
+const PORT=process.env.PORT||3000;
+app.use(express.json({limit:"1mb"})); app.use(express.urlencoded({extended:true}));
+app.use(cookieParser()); app.use(express.static(__dirname));
+app.use(rateLimit({windowMs:15*60*1000,max:300}));
+db.exec(`CREATE TABLE IF NOT EXISTS cards(id INTEGER PRIMARY KEY AUTOINCREMENT, plan TEXT, code TEXT UNIQUE, used INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT, plan TEXT, price INTEGER, name TEXT, contact TEXT, transaction_id TEXT, note TEXT, status TEXT DEFAULT 'pending', card_code TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);`);
+const plans={daily:{name:"يومي",price:25},weekly:{name:"أسبوعي",price:100},fifteen:{name:"15 يوم",price:170}};
+function auth(req,res,next){let s=req.cookies.hn_admin;if(!s||s!==process.env.SESSION_SECRET) return res.status(401).json({error:"غير مصرح"});next()}
+app.get("/api/config",(req,res)=>res.json({shamCashAccount:process.env.SHAM_CASH_ACCOUNT,shamCashName:process.env.SHAM_CASH_NAME,plans}));
+app.post("/api/orders",(req,res)=>{let {plan,name,contact,transactionId,note}=req.body,p=plans[plan];if(!p||!name||!contact||!transactionId)return res.status(400).json({error:"أكمل بيانات الطلب"});let q=db.prepare("INSERT INTO orders(plan,price,name,contact,transaction_id,note) VALUES(?,?,?,?,?,?)").run(p.name,p.price,name,contact,transactionId,note||"");res.json({ok:true,id:q.lastInsertRowid})});
+app.post("/api/admin/login",(req,res)=>{if(req.body.user===process.env.ADMIN_USER&&req.body.password===process.env.ADMIN_PASSWORD){res.cookie("hn_admin",process.env.SESSION_SECRET,{httpOnly:true,sameSite:"lax",secure:process.env.NODE_ENV==="production"});return res.json({ok:true})}res.status(401).json({error:"بيانات الدخول غير صحيحة"})});
+app.post("/api/admin/logout",(req,res)=>{res.clearCookie("hn_admin");res.json({ok:true})});
+app.get("/api/admin/orders",auth,(req,res)=>res.json(db.prepare("SELECT * FROM orders ORDER BY id DESC").all()));
+app.get("/api/admin/cards",auth,(req,res)=>res.json(db.prepare("SELECT * FROM cards ORDER BY id DESC").all()));
+app.post("/api/admin/cards",auth,(req,res)=>{let {plan,code}=req.body;if(!plans[plan]||!code)return res.status(400).json({error:"بيانات غير مكتملة"});try{db.prepare("INSERT INTO cards(plan,code) VALUES(?,?)").run(plans[plan].name,code.trim());res.json({ok:true})}catch(e){res.status(400).json({error:"الكود موجود مسبقاً"})}});
+app.delete("/api/admin/cards/:id",auth,(req,res)=>{db.prepare("DELETE FROM cards WHERE id=? AND used=0").run(req.params.id);res.json({ok:true})});
+app.post("/api/admin/orders/:id/approve",auth,(req,res)=>{let o=db.prepare("SELECT * FROM orders WHERE id=?").get(req.params.id);if(!o||o.status!=="pending")return res.status(400).json({error:"الطلب غير متاح"});let c=db.prepare("SELECT * FROM cards WHERE plan=? AND used=0 LIMIT 1").get(o.plan);if(!c)return res.status(400).json({error:"لا يوجد كود متوفر لهذه الباقة"});db.prepare("UPDATE cards SET used=1 WHERE id=?").run(c.id);db.prepare("UPDATE orders SET status='approved',card_code=? WHERE id=?").run(c.code,o.id);res.json({ok:true,code:c.code})});
+app.post("/api/admin/orders/:id/reject",auth,(req,res)=>{db.prepare("UPDATE orders SET status='rejected' WHERE id=?").run(req.params.id);res.json({ok:true})});
+app.listen(PORT,()=>console.log("Hanin Net running on "+PORT));
